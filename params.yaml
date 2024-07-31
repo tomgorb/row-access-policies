@@ -1,0 +1,8 @@
+PARTS: 1
+
+TABLE_ID: "audience"
+VIEW_NAME: "insights"
+
+SOURCE_DATASET: "web"
+TARGET_DATASET: "shared_data"
+VIEWS_DATASET: "shared_views"

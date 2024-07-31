@@ -1,0 +1,98 @@
+-- DATAPREP
+-- SOURCE_FIELDS: source schema
+DECLARE
+ SOURCE_FIELDS ARRAY<STRING>;
+ -- IDENTIFIERS, FARMS: filter and partition
+DECLARE
+ IDENTIFIERS ARRAY<STRING>;
+DECLARE
+ FARMS ARRAY<INT64>;
+ -- PARTS: number of data partitioning to avoid 100 row access policies limit (if more than 100 partitions)
+DECLARE
+ PARTS INT64 DEFAULT {PARTS}; 
+ --
+DECLARE
+ i INT64 DEFAULT 0;
+ --
+DECLARE
+ QUERIES STRING DEFAULT "SELECT * FROM `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}_part_1`";
+ --
+DECLARE
+ j INT64 DEFAULT 1;
+ --
+SET
+ SOURCE_FIELDS = (
+ SELECT
+   ARRAY_AGG(CONCAT(column_name, " ", data_type))
+ FROM
+   `{PROJECT_ID}.{SOURCE_DATASET}.INFORMATION_SCHEMA.COLUMNS`
+ WHERE
+   table_name = "{TABLE_ID}");
+ -- Create target like source and partition by identifier (through farm_fingerprint)
+DROP SCHEMA IF EXISTS `{PROJECT_ID}.{TARGET_DATASET}` CASCADE;
+CREATE SCHEMA `{PROJECT_ID}.{TARGET_DATASET}` OPTIONS (location = 'EU');
+EXECUTE IMMEDIATE
+ "CREATE TABLE `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}` (" || (
+ SELECT
+   STRING_AGG(field, ",")
+ FROM
+   UNNEST(SOURCE_FIELDS) AS field) || ",_index INT64) PARTITION BY RANGE_BUCKET(_index, GENERATE_ARRAY(-9223372036854775808,9223372036854775807,2000000000000000)) CLUSTER BY identifier";
+ -- Copy data from source to target
+INSERT INTO
+ `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}` (
+ SELECT
+   *,
+   FARM_FINGERPRINT(identifier) AS _index
+ FROM
+   `{PROJECT_ID}.{SOURCE_DATASET}.{TABLE_ID}`);
+ -- Loop over PARTS to split data and create default row access policy
+LOOP
+SET
+ i = i + 1;
+IF
+ i > PARTS THEN
+LEAVE
+ ;
+END IF
+ ;
+EXECUTE IMMEDIATE
+ "CREATE TABLE `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}_part_" || i || "`LIKE `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}`";
+SET
+ (identifiers,
+   farms) = (
+ SELECT
+   ( ARRAY_AGG(DISTINCT identifier),
+     ARRAY_AGG(DISTINCT FARM_FINGERPRINT(identifier)))
+ FROM
+   `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}`
+   -- part is assigned using last digit of identifier
+ WHERE
+   CAST(CEIL((CAST(SUBSTR(identifier, -1) AS INT64)+1)/(10/PARTS)) AS INT64)=i);
+EXECUTE IMMEDIATE
+ "INSERT INTO `"|| CONCAT ('{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}_part_', i) || "` SELECT * FROM `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}` WHERE identifier IN UNNEST(@identifiers) AND _index IN UNNEST(@farms)"
+USING
+ identifiers AS identifiers,
+ farms AS farms;
+ EXECUTE IMMEDIATE
+ "CREATE OR REPLACE ROW ACCESS POLICY ownership ON `" || CONCAT ('{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}_part_', i) || "` GRANT TO ('user:{USER}') FILTER USING (0=1)";
+END LOOP
+ ;
+ -- Create  view on all parts in a shared_views dataset
+CREATE SCHEMA IF NOT EXISTS `{PROJECT_ID}.{VIEWS_DATASET}` OPTIONS (location = 'EU');
+LOOP
+SET
+ j = j + 1;
+IF
+ j > PARTS THEN
+LEAVE
+ ;
+END IF
+ ;
+EXECUTE IMMEDIATE
+ "SELECT CONCAT(@QUERIES, ' UNION ALL SELECT * FROM `{PROJECT_ID}.{TARGET_DATASET}.{TABLE_ID}_part_" || j || "`')" INTO QUERIES
+USING
+ QUERIES AS QUERIES;
+END LOOP
+ ;
+EXECUTE IMMEDIATE
+ "CREATE OR REPLACE VIEW `{PROJECT_ID}.{VIEWS_DATASET}.{VIEW_NAME}` AS (" || QUERIES || ")";
