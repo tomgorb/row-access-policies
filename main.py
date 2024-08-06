@@ -67,6 +67,7 @@ if __name__ == "__main__":
         proc = f.read()
 
     job = bq_client.query(proc.format(PROJECT_ID = project_id,
+                                      PROJECT_ID_VIEW = os.environ["GCP_PROJECT_ID_VIEW"],
                                       USER = os.environ["GCP_USER"], **params))
     job.result()
     logger.info("Data preparation: DONE")
